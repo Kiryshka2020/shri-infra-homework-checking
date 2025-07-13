@@ -1,0 +1,71 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release version to deploy'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure Docker for Yandex Container Registry
+        run: |
+          echo "${{ secrets.YANDEX_CLOUD_SA_KEY }}" | docker login --username json_key --password-stdin cr.yandex
+
+      - name: Check if Docker image exists
+        run: |
+          docker manifest inspect cr.yandex/fv4dhag06365tj3kufig/app:${{ github.event.inputs.release_version }}_latest > /dev/null
+
+      - name: Deploy to production server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: 158.160.153.169
+          username: ${{ secrets.VM_USERNAME }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            # Stop existing container if running
+            docker stop shri-app || true
+            docker rm shri-app || true
+
+            # Login to Yandex Container Registry
+            echo "${{ secrets.YANDEX_CLOUD_SA_KEY }}" | docker login --username json_key --password-stdin cr.yandex
+
+            # Pull and run the latest version
+            docker pull cr.yandex/fv4dhag06365tj3kufig/app:${{ github.event.inputs.release_version }}_latest
+            docker run -d --name shri-app -p 3000:3000 cr.yandex/fv4dhag06365tj3kufig/app:${{ github.event.inputs.release_version }}_latest
+
+            # Wait for container to start
+            sleep 10
+
+            # Check if container is running
+            docker ps | grep shri-app
+
+      - name: Find release issue
+        id: issue
+        run: |
+          ISSUE_NUMBER=$(gh issue list --search "Release ${{ github.event.inputs.release_version }}" --state all --limit 1 --json number --jq '.[0].number')
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add deployment comment to release issue
+        run: |
+          gh issue comment ${{ steps.issue.outputs.issue_number }} --body "**Deployed to Production:**
+
+          - **Date:** $(date)
+          - **Deployed by:** ${{ github.actor }}
+          - **Version:** ${{ github.event.inputs.release_version }}
+          - **Server:** 158.160.153.169
+          - **Application URL:** http://158.160.153.169:3000/hw/store
+
+          Release has been successfully deployed to production!"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
